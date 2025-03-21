@@ -12,18 +12,20 @@ const client = new Client({
 });
 
 const ROLE_ID = '1352243600859070506'; // ID du rôle "Membre vérifié"
+const NEW_MEMBER_ROLE_ID = '1352585722040680469'; // ID du rôle "Nouveau Membre"
 const CHANNEL_ID = '1352270110483808391'; // ID du canal de vérification
+const LOG_CHANNEL_ID = '1352599410030153778'; // ID du canal des logs (à définir dans ton serveur)
 
 client.once('ready', async () => {
     console.log('✅ Bot is online!');
-
+    
     const channel = await client.channels.fetch(CHANNEL_ID);
     if (!channel) return console.error("❌ Le canal spécifié est introuvable.");
 
     // 🧹 Suppression des anciens messages du salon
     try {
         const messages = await channel.messages.fetch();
-        await channel.bulkDelete(messages);
+        await channel.bulkDelete(messages, true); // 'true' pour ignorer les messages trop anciens
         console.log("🧹 Salon nettoyé !");
     } catch (error) {
         console.error("❌ Impossible de nettoyer le salon :", error);
@@ -48,25 +50,32 @@ client.once('ready', async () => {
 client.on("guildMemberAdd", async (member) => {
     console.log(`👤 Nouveau membre : ${member.user.tag}`);
 
-    const channel = await member.guild.channels.fetch(CHANNEL_ID);
-    if (!channel) return console.error("❌ Le canal de vérification est introuvable !");
-
-    const role = member.guild.roles.cache.get(ROLE_ID);
-    if (!role) return console.error("❌ Le rôle de vérification n'existe pas !");
-
-    // 🔄 Vérification si l'ID est dans la base Google Sheets
-    const sheetIDs = await getDiscordIDs();
-    if (!sheetIDs.includes(member.id)) {
+    const newMemberRole = member.guild.roles.cache.get(NEW_MEMBER_ROLE_ID);
+    if (newMemberRole) {
         try {
-            await channel.send({
-                content: `👋 ${member}, vous devez vérifier votre compte en cliquant sur le bouton ci-dessus.`,
-                ephemeral: true // 👀 Ce message est **visible uniquement par la personne non vérifiée**
-            });
-            console.log(`📩 Message temporaire envoyé à ${member.user.tag} dans le salon.`);
+            await member.roles.add(newMemberRole);
+            console.log(`🎉 Rôle "Nouveau Membre" attribué à ${member.user.tag}`);
         } catch (error) {
-            console.error(`❌ Impossible d'envoyer le message temporaire à ${member.user.tag} :`, error);
+            console.error(`❌ Impossible d'attribuer le rôle "Nouveau Membre" à ${member.user.tag} :`, error);
         }
+    } else {
+        console.error("❌ Le rôle 'Nouveau Membre' n'existe pas !");
     }
+
+    // Expiration du rôle "Nouveau Membre" après 48 heures
+    setTimeout(async () => {
+        const member = await member.guild.members.fetch(member.id);
+        const newMemberRole = member.guild.roles.cache.get(NEW_MEMBER_ROLE_ID);
+
+        if (member && newMemberRole && member.roles.cache.has(newMemberRole.id)) {
+            await member.roles.remove(newMemberRole);
+            console.log(`🕑 Le rôle "Nouveau Membre" a été retiré de ${member.user.tag} après expiration.`);
+            const logChannel = await member.guild.channels.fetch(LOG_CHANNEL_ID);
+            if (logChannel) {
+                logChannel.send(`🕑 Le rôle "Nouveau Membre" a été retiré de ${member.user.tag} après 48 heures sans vérification.`);
+            }
+        }
+    }, 48 * 60 * 60 * 1000); // 48 heures (en millisecondes)
 });
 
 client.on("interactionCreate", async (interaction) => {
@@ -74,7 +83,9 @@ client.on("interactionCreate", async (interaction) => {
     if (interaction.customId !== "verify") return;
 
     const role = interaction.guild.roles.cache.get(ROLE_ID);
-    if (!role) return interaction.reply({ content: "❌ Le rôle n'existe pas !", ephemeral: true });
+    const newMemberRole = interaction.guild.roles.cache.get(NEW_MEMBER_ROLE_ID);
+    
+    if (!role) return interaction.reply({ content: "❌ Le rôle de vérification n'existe pas !", ephemeral: true });
 
     try {
         const userId = interaction.user.id;
@@ -85,11 +96,30 @@ client.on("interactionCreate", async (interaction) => {
 
         if (sheetIDs.includes(userId)) {
             await interaction.member.roles.add(role);
-            await interaction.reply({ content: "✅ Vous avez été vérifié avec succès !", ephemeral: true });
             console.log(`✔️ Utilisateur ${interaction.user.tag} (${userId}) vérifié.`);
+
+            // 🚀 Suppression du rôle "Nouveau Membre"
+            if (newMemberRole && interaction.member.roles.cache.has(newMemberRole.id)) {
+                await interaction.member.roles.remove(newMemberRole);
+                console.log(`🗑️ Rôle "Nouveau Membre" retiré à ${interaction.user.tag}`);
+            }
+
+            // Envoi d'un message dans le canal des logs
+            const logChannel = await interaction.guild.channels.fetch(LOG_CHANNEL_ID);
+            if (logChannel) {
+                logChannel.send(`✔️ ${interaction.user.tag} a été vérifié et le rôle "Nouveau Membre" a été retiré.`);
+            }
+
+            await interaction.reply({ content: "✅ Vous avez été vérifié avec succès !", ephemeral: true });
         } else {
             await interaction.reply({ content: "❌ Votre ID ne correspond pas à notre base de données.", ephemeral: true });
             console.log(`❌ Utilisateur ${interaction.user.tag} (${userId}) a échoué à la vérification.`);
+
+            // Log échoué dans le canal des logs
+            const logChannel = await interaction.guild.channels.fetch(LOG_CHANNEL_ID);
+            if (logChannel) {
+                logChannel.send(`❌ ${interaction.user.tag} a échoué à la vérification.`);
+            }
         }
     } catch (error) {
         console.error("❌ Erreur lors de la vérification :", error);
